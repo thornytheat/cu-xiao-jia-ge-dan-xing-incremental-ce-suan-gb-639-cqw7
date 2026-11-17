@@ -82,7 +82,26 @@ REASONS = {
         "销量是空值哨兵，已隔离", "哨兵不是 0 销量"),
     "P_QTY_NEGATIVE": _r(
         "P_QTY_NEGATIVE", ERROR, "price",
-        "销量为负数", "退货单独成行，不参与促销测算"),
+        "销量为负且不是合规退货行", "负销量需带退货编号与原销售日，按分次退货入账"),
+    # ---- M2 退货（分次退货、原售/退款分账） ----
+    "Q_RETURN_APPLIED": _r(
+        "Q_RETURN_APPLIED", INFO, "quality",
+        "退货已入账：退款记退货日，购买量扣回原销售日", "入模销量用剩余销量，退货当天不当需求暴跌"),
+    "Q_RETURN_NO_ID": _r(
+        "Q_RETURN_NO_ID", ERROR, "quality",
+        "退货行缺少退货编号，无法分次留账", "补退货编号后重放，重试不重复扣减"),
+    "Q_RETURN_BAD_ORIGIN_DATE": _r(
+        "Q_RETURN_BAD_ORIGIN_DATE", ERROR, "quality",
+        "原销售日无法解析为自然日", "支持 yyyy-mm-dd / yyyy/mm/dd / yyyymmdd，补齐后重放"),
+    "Q_RETURN_NO_ORIGIN": _r(
+        "Q_RETURN_NO_ORIGIN", ERROR, "quality",
+        "退货指向的原销售日没有该商品该渠道的销售记录", "补齐原售日销后可在隔离区重放"),
+    "Q_RETURN_EXCEED": _r(
+        "Q_RETURN_EXCEED", ERROR, "quality",
+        "退货量超过原销售日的剩余可退量", "分次退货累计不能超过原售购买量，核对后重放"),
+    "Q_RETURN_DUP_ID": _r(
+        "Q_RETURN_DUP_ID", ERROR, "quality",
+        "退货编号重复，同一退货只能入账一次", "按退货编号去重，重复行进隔离区"),
     # ---- M3 质量 ----
     "Q_MISSING_DAY": _r(
         "Q_MISSING_DAY", WARN, "quality",

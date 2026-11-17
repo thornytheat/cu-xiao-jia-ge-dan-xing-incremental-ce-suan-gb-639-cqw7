@@ -84,6 +84,23 @@ def _bad(code: str, message: str, detail: dict | None = None):
     return Unprocessable(message, code=code, detail=detail or {})
 
 
+def _refund_only_days(store, batch_id: str, sales_rows) -> list[dict]:
+    """退货发生日没有销售行的纯退款：从退货台账重建，给设计序列当负金额日。"""
+    sale_days = {(r["sku"], r["channel"], r["sale_date"]) for r in sales_rows}
+    out = []
+    for row in store.returns(batch_id):
+        if row["status"] != "applied":
+            continue
+        key = (row["sku"], row["channel"], row["refund_date"])
+        if key in sale_days:
+            continue
+        out.append({"sku": row["sku"], "channel": row["channel"],
+                    "sale_date": dt.date.fromisoformat(row["refund_date"]),
+                    "amount": -Decimal(row["refund_amount"]),
+                    "line_no": row["line_no"], "return_id": row["return_id"]})
+    return out
+
+
 def series_options(store, batch_id: str) -> list[dict]:
     """可选的目标商品：批次里出现过的「商品 × 渠道」，按商品编码排序。"""
     seen: dict[tuple[str, str], str] = {}
@@ -199,7 +216,8 @@ def design(store, batch_id: str, params: dict) -> dict:
 
     rows = store.sales(batch_id)
     windows = store.promo_windows(batch_id)
-    series = power.build_series(rows, sku, channel)
+    refund_only = _refund_only_days(store, batch_id, rows)
+    series = power.build_series(rows, sku, channel, refund_only)
     if series is None:
         raise _bad("D_UNKNOWN_SERIES", f"{sku}/{channel} 没有日销记录",
                    {"sku": sku, "channel": channel})

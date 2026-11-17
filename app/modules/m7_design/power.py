@@ -59,9 +59,11 @@ def normal_cdf(x: float) -> float:
     return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
 
 
-def build_series(rows, sku: str, channel: str) -> list[dict] | None:
+def build_series(rows, sku: str, channel: str, refund_only=()) -> list[dict] | None:
     """把某商品某渠道的日销汇总成按日序列，缺日留在序列里并标 present=False。
 
+    金额与销量都取净口径（剩余销量 / 净销售额）；退货发生日没有销售行时，
+    refund_only 里的纯退款会把那天标成 present=True 的负金额日，不会被当成缺日。
     返回 None 表示这个商品在该渠道没有任何记录。
     """
     days: dict[str, dict] = {}
@@ -71,10 +73,17 @@ def build_series(rows, sku: str, channel: str) -> list[dict] | None:
         day = row["sale_date"]
         slot = days.setdefault(day, {"gmv": Decimal("0"), "qty": 0,
                                      "price": Decimal("0"), "lines": 0})
-        slot["gmv"] += Decimal(str(row["amount_excl"]))
-        slot["qty"] += int(row["qty"])
+        slot["gmv"] += Decimal(str(row.get("net_amount", row["amount_excl"])))
+        slot["qty"] += int(row.get("net_qty", row["qty"]))
         slot["price"] += Decimal(str(row["price_excl"] or "0"))
         slot["lines"] += 1
+    for item in refund_only:
+        if item["sku"] != sku or item["channel"] != channel:
+            continue
+        slot = days.setdefault(item["sale_date"].isoformat(),
+                               {"gmv": Decimal("0"), "qty": 0,
+                                "price": Decimal("0"), "lines": 0})
+        slot["gmv"] += item["amount"]
     if not days:
         return None
     keys = sorted(days)

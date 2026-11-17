@@ -17,7 +17,12 @@ LIFT_HEADER = ("促销编号", "商品编码", "渠道", "开始日期", "结束
                "弹性", "结论")
 
 SALES_HEADER = ("行号", "日期", "渠道", "商品编码", "商品名称", "含税单价",
-                "单价单位", "税率", "不含税单价", "销量", "销售额", "促销编号")
+                "单价单位", "税率", "不含税单价", "原售销量", "原售销售额",
+                "已退销量", "退款金额", "剩余销量", "净销售额", "促销编号", "退货编号")
+
+RETURN_HEADER = ("行号", "退货编号", "商品编码", "渠道", "商品名称", "退货发生日",
+                 "原销售日", "退货量", "含税单价", "不含税单价", "税率",
+                 "退款金额", "状态", "原因码", "说明", "原售行号")
 
 ELASTIC_HEADER = ("范围", "分组", "样本数", "0 销量条数", "截距", "弹性",
                   "标准误", "t 值", "R²", "0 销量处理", "结论")
@@ -55,9 +60,37 @@ def sales_csv(rows) -> str:
         body.append((
             row["line_no"], row["sale_date"], row["channel"], row["sku"],
             row["sku_name"], row["price_incl"], row["price_unit"], row["tax_rate"],
-            row["price_excl"], row["qty"], row["amount_excl"], row["promo_id"],
+            row["price_excl"], row["qty"], row["amount_excl"],
+            row.get("returned_qty", 0), row.get("refund_excl", "0"),
+            row.get("net_qty", row["qty"]),
+            row.get("net_amount", row["amount_excl"]), row["promo_id"],
+            " ".join(_json_list(row.get("return_ids_json", "[]"))),
         ))
     return _write(SALES_HEADER, body)
+
+
+def returns_csv(rows) -> str:
+    body = []
+    for row in rows:
+        body.append((
+            row["line_no"], row["return_id"], row["sku"], row["channel"],
+            row.get("sku_name", ""), row["refund_date"],
+            row.get("origin_date") or "", row["qty"], row["price_incl"],
+            row["price_excl"], row["tax_rate"], row["refund_amount"],
+            "已入账" if row["status"] == "applied" else "已隔离",
+            row.get("code", ""), row.get("detail", ""),
+            row.get("origin_line_no") if row.get("origin_line_no") is not None else "",
+        ))
+    return _write(RETURN_HEADER, body)
+
+
+def _json_list(raw: str) -> list[str]:
+    import json
+    try:
+        value = json.loads(raw or "[]")
+        return value if isinstance(value, list) else []
+    except (ValueError, TypeError):
+        return []
 
 
 def elastic_csv(rows) -> str:
@@ -82,6 +115,7 @@ def reconcile_csv(rows) -> str:
 KINDS = {
     "lift": ("增量明细", lift_csv),
     "sales": ("入模日销", sales_csv),
+    "returns": ("退货台账", returns_csv),
     "elastic": ("弹性结果", elastic_csv),
     "reconcile": ("账目核对", reconcile_csv),
 }

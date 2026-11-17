@@ -52,17 +52,19 @@ def build(rows, zero_mode: str = config.ZERO_MODE_SHIFT) -> list[Sample]:
         if row.channel not in pooled:
             pooled[row.channel] = Sample(scope="channel", group_key=row.channel)
         targets = (buckets[key], pooled[row.channel], overall)
+        # 入模用剩余销量（原售购买量 − 扣回到本日的退货），退货当天不产生需求点
+        qty = getattr(row, "net_qty", row.qty)
         for sample in targets:
             sample.prices.add(str(row.price_excl))
-            if row.qty <= 0:
+            if qty <= 0:
                 sample.zero_count += 1
                 if zero_mode == config.ZERO_MODE_DROP:
                     sample.dropped_count += 1
                     continue
             if zero_mode == config.ZERO_MODE_SHIFT:
-                y = math.log(float(row.qty) + float(config.ZERO_SHIFT))
+                y = math.log(float(qty) + float(config.ZERO_SHIFT))
             else:
-                y = math.log(float(row.qty))
+                y = math.log(float(qty))
             sample.xs.append(_log_price(row.price_excl))
             sample.ys.append(y)
 

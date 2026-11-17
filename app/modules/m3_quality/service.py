@@ -60,6 +60,11 @@ def assess(normalized: dict) -> dict:
         "promo_versions": normalized["promo_versions"],
         "dropped": dropped,
         "grade_rows": metrics.grade_rows(accounts),
+        "returns": normalized.get("returns", []),
+        "refund_only": normalized.get("refund_only", []),
+        "return_candidates": normalized.get("return_candidates", 0),
+        "returns_applied": normalized.get("returns_applied", []),
+        "returns_quarantined": normalized.get("returns_quarantined", []),
     }
 
 

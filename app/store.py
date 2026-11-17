@@ -41,9 +41,25 @@ CREATE TABLE IF NOT EXISTS sales (
     price_incl TEXT, price_unit TEXT, tax_rate TEXT, price_excl TEXT,
     qty INTEGER NOT NULL, promo_id TEXT NOT NULL DEFAULT '',
     amount_excl TEXT NOT NULL DEFAULT '0',
-    raw_json TEXT NOT NULL DEFAULT '{}', flags_json TEXT NOT NULL DEFAULT '[]'
+    raw_json TEXT NOT NULL DEFAULT '{}', flags_json TEXT NOT NULL DEFAULT '[]',
+    returned_qty INTEGER NOT NULL DEFAULT 0,
+    refund_excl TEXT NOT NULL DEFAULT '0',
+    net_qty INTEGER NOT NULL DEFAULT 0,
+    net_amount TEXT NOT NULL DEFAULT '0',
+    return_ids_json TEXT NOT NULL DEFAULT '[]'
 );
 CREATE INDEX IF NOT EXISTS idx_sales_batch ON sales(batch_id, sku, channel, sale_date);
+
+CREATE TABLE IF NOT EXISTS returns (
+    batch_id TEXT NOT NULL, line_no INTEGER NOT NULL, return_id TEXT NOT NULL,
+    sku TEXT NOT NULL, channel TEXT NOT NULL, sku_name TEXT NOT NULL,
+    refund_date TEXT NOT NULL, origin_date TEXT, qty INTEGER NOT NULL,
+    price_incl TEXT NOT NULL, price_excl TEXT NOT NULL, tax_rate TEXT NOT NULL,
+    refund_amount TEXT NOT NULL, status TEXT NOT NULL,
+    code TEXT NOT NULL DEFAULT '', detail TEXT NOT NULL DEFAULT '',
+    origin_line_no INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_returns_batch ON returns(batch_id, status, sku, channel);
 
 CREATE TABLE IF NOT EXISTS promos (
     batch_id TEXT NOT NULL, promo_id TEXT NOT NULL, sku TEXT NOT NULL, channel TEXT NOT NULL,
@@ -104,8 +120,18 @@ CREATE TABLE IF NOT EXISTS manifests (
 """
 
 BATCH_TABLES = (
-    "sources", "sales", "promos", "promo_windows", "quarantine",
+    "sources", "sales", "returns", "promos", "promo_windows", "quarantine",
     "elasticity", "lift", "spread", "stages", "totals", "manifests",
+)
+
+# 老库平滑升级：1.5.0 给 sales 加净口径列、新增 returns 表。
+# 列已存在时 ALTER 会抛错，捕获后继续，保证新老库都能打开。
+_MIGRATIONS = (
+    "ALTER TABLE sales ADD COLUMN returned_qty INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE sales ADD COLUMN refund_excl TEXT NOT NULL DEFAULT '0'",
+    "ALTER TABLE sales ADD COLUMN net_qty INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE sales ADD COLUMN net_amount TEXT NOT NULL DEFAULT '0'",
+    "ALTER TABLE sales ADD COLUMN return_ids_json TEXT NOT NULL DEFAULT '[]'",
 )
 
 
@@ -115,6 +141,11 @@ class Store:
         Path(self.path).resolve().parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as conn:
             conn.executescript(SCHEMA)
+            for statement in _MIGRATIONS:
+                try:
+                    conn.execute(statement)
+                except sqlite3.OperationalError:
+                    pass
 
     @contextmanager
     def connect(self):
@@ -177,6 +208,12 @@ class Store:
         for table in BATCH_TABLES:
             conn.execute(f"DELETE FROM {table} WHERE batch_id=?", (batch_id,))
 
+    def delete_batch(self, batch_id: str) -> None:
+        """整批删除（含批次头），崩溃恢复与隔离重放共用，一个事务完成。"""
+        with self.connect() as conn:
+            self.clear_batch_rows(batch_id, conn)
+            conn.execute("DELETE FROM batches WHERE batch_id=?", (batch_id,))
+
     # ---------- 写入（一次事务） ----------
     def write_batch(self, batch_id: str, payload: dict) -> None:
         """payload 的每个键对应一张表；整批一次事务，失败回滚不留半批。"""
@@ -195,14 +232,34 @@ class Store:
                 conn.execute(
                     """INSERT INTO sales (batch_id, line_no, sale_date, channel, sku,
                             sku_name, price_incl, price_unit, tax_rate, price_excl, qty,
-                            promo_id, amount_excl, raw_json, flags_json)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                            promo_id, amount_excl, raw_json, flags_json,
+                            returned_qty, refund_excl, net_qty, net_amount,
+                            return_ids_json)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (batch_id, row["line_no"], row["sale_date"], row["channel"], row["sku"],
                      row["sku_name"], row.get("price_incl"), row.get("price_unit"),
                      row.get("tax_rate"), row.get("price_excl"), row["qty"],
                      row.get("promo_id", ""), row.get("amount_excl", "0"),
                      row.get("raw_json", "{}"),
-                     json.dumps(row.get("flags", []), ensure_ascii=False)))
+                     json.dumps(row.get("flags", []), ensure_ascii=False),
+                     int(row.get("returned_qty", 0)),
+                     row.get("refund_excl", "0"),
+                     int(row.get("net_qty", row["qty"])),
+                     row.get("net_amount", row.get("amount_excl", "0")),
+                     json.dumps(row.get("return_ids", []), ensure_ascii=False)))
+            for row in payload.get("returns", []):
+                conn.execute(
+                    """INSERT INTO returns (batch_id, line_no, return_id, sku, channel,
+                            sku_name, refund_date, origin_date, qty, price_incl,
+                            price_excl, tax_rate, refund_amount, status, code, detail,
+                            origin_line_no)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (batch_id, row["line_no"], row["return_id"], row["sku"],
+                     row["channel"], row.get("sku_name", ""), row["refund_date"],
+                     row.get("origin_date"), row["qty"], row["price_incl"],
+                     row["price_excl"], row["tax_rate"], row["refund_amount"],
+                     row["status"], row.get("code", ""), row.get("detail", ""),
+                     row.get("origin_line_no")))
             for row in payload.get("promos", []):
                 conn.execute(
                     """INSERT INTO promos (batch_id, promo_id, sku, channel, version,
@@ -299,6 +356,35 @@ class Store:
             row = conn.execute("SELECT COUNT(*) AS c FROM sales WHERE batch_id=?",
                                (batch_id,)).fetchone()
         return int(row["c"]) if row else 0
+
+    def returns(self, batch_id: str) -> list[dict]:
+        return self._rows(
+            "SELECT * FROM returns WHERE batch_id=? ORDER BY line_no", (batch_id,))
+
+    def returns_count(self, batch_id: str, status: str | None = None) -> int:
+        with self.connect() as conn:
+            if status is None:
+                row = conn.execute(
+                    "SELECT COUNT(*) AS c FROM returns WHERE batch_id=?",
+                    (batch_id,)).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT COUNT(*) AS c FROM returns WHERE batch_id=? AND status=?",
+                    (batch_id, status)).fetchone()
+        return int(row["c"]) if row else 0
+
+    def unfinished_batches(self) -> list[dict]:
+        """崩溃恢复：状态不是 done 的批次（running / failed）都是没写完整的残留。"""
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM batches WHERE status != 'done' "
+                "ORDER BY created_at, rowid").fetchall()
+        return [dict(r) for r in rows]
+
+    def mark_batch_failed(self, batch_id: str) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE batches SET status='failed' WHERE batch_id=?", (batch_id,))
 
     def promos(self, batch_id: str) -> list[dict]:
         return self._rows(

@@ -39,7 +39,9 @@ def test_full_pipeline_end_to_end(client):
 
     report = client.get("/api/report").json()
     assert report["balanced"] is True
-    assert len(report["reconcile"]) == 5
+    assert len(report["reconcile"]) == 6
+    accounts = [row["account"] for row in report["reconcile"]]
+    assert accounts == ["行账", "天数账", "促销账", "金额账", "分摊账", "退货账"]
 
     csv_body = client.get("/api/export?kind=reconcile")
     assert csv_body.status_code == 200
@@ -118,7 +120,7 @@ def test_health_and_datasets(client):
     assert health["rule_version"]
     sets = client.get("/api/datasets").json()
     keys = [item["key"] for item in sets["datasets"]]
-    assert keys == ["main", "utf8bom", "truncated", "header_only", "empty"]
+    assert keys == ["main", "utf8bom", "truncated", "header_only", "returns", "empty"]
     assert sets["zero_modes"] == ["shift", "drop"]
 
 

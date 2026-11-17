@@ -22,9 +22,13 @@ FIELDS = (
     {"name": "税率", "type": "decimal", "unit": "—", "precision": "2 位", "nullable": True,
      "rule": "白名单 0.09 / 0.13；不在白名单按 0.13 并记提示"},
     {"name": "销量", "type": "integer", "unit": "件", "precision": "整数", "nullable": False,
-     "rule": "负数隔离；哨兵不当 0"},
+     "rule": "负销量是退货行，须带退货编号与原销售日；哨兵不当 0"},
     {"name": "促销编号", "type": "text", "unit": "—", "precision": "—", "nullable": True,
      "rule": "空值表示非促销日"},
+    {"name": "退货编号", "type": "text", "unit": "—", "precision": "—", "nullable": True,
+     "rule": "负销量退货行必填，同编号只能入账一次，重复进隔离区"},
+    {"name": "原销售日", "type": "date", "unit": "—", "precision": "日", "nullable": True,
+     "rule": "退货指向的原售日期；无原售或超额退货隔离，补齐后可重放"},
 )
 
 PROMO_FIELDS = (
@@ -57,6 +61,8 @@ RULES = (
      "value": "促销前 14 天日均 × 促销有效天数 × 对照组同期增长倍数"},
     {"key": "amount", "label": "销售额",
      "value": "不含税单价 × 件数，Decimal 累加后统一保留 2 位"},
+    {"key": "returns", "label": "分次退货",
+     "value": "退款记退货发生日销售额，购买量扣回原销售日；入模用剩余销量，超额/无原售退货隔离后可重放"},
 )
 
 

@@ -15,8 +15,70 @@
   </ul>
   <div class="actions">
     <a class="btn" href="/api/quarantine.csv">导出隔离行</a>
+    <a class="btn btn-ghost" href="/api/export?kind=returns">导出退货台账</a>
     <a class="btn btn-ghost" href="/report">去报告</a>
   </div>
+</section>
+
+<section class="section">
+  <div class="section-head">
+    <h2 class="section-title">隔离到重放</h2>
+    <p class="section-figure">补齐原售 / 退货编号后重跑，重试不重复扣减</p>
+  </div>
+  <form class="form" data-endpoint="/api/quarantine/replay" data-method="POST" data-redirect="/quarantine">
+    <label class="field">
+      <span>样例集</span>
+      <select name="dataset">
+        {% for key, ds in datasets.items() if ds.get("sales") %}
+        <option value="{{ key }}"{% if key == dataset %} selected{% endif %}>{{ key }} · {{ ds.label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label class="field">
+      <span>0 销量处理</span>
+      <select name="zero_mode">
+        <option value="shift">shift · 平移 ln(q+0.5)</option>
+        <option value="drop">drop · 剔除并计数</option>
+      </select>
+    </label>
+    <div class="actions">
+      <button class="btn" type="submit">补齐后重放</button>
+    </div>
+  </form>
+  <p class="form-note" hidden></p>
+</section>
+
+<section class="section">
+  <div class="section-head">
+    <h2 class="section-title">退货台账（原售与退款分账）</h2>
+    <p class="section-figure">{{ return_rows | length }} 笔 · 退款记退货日，购买量扣回原销售日</p>
+  </div>
+  {% if return_rows %}
+  <div class="table-wrap">
+    <table class="grid" data-sortable>
+      <thead>
+        <tr><th class="num">行号</th><th>退货编号</th><th>商品/渠道</th><th>退货发生日</th><th>原销售日</th><th class="num">退货量</th><th class="num">退款金额</th><th>状态</th><th>原因码 / 说明</th></tr>
+      </thead>
+      <tbody>
+        {% for row in return_rows %}
+        <tr data-level="{{ 'info' if row.status == 'applied' else 'error' }}">
+          <td class="num">{{ row.line_no }}</td>
+          <td>{{ row.return_id or "—" }}</td>
+          <td>{{ row.sku }} / {{ row.channel }}</td>
+          <td>{{ row.refund_date }}</td>
+          <td>{{ row.origin_date or "—" }}</td>
+          <td class="num">{{ row.qty }}</td>
+          <td class="num">{{ row.refund_amount | money }}</td>
+          <td><span class="tag {{ 'tag-ok' if row.status == 'applied' else 'tag-error' }}">{{ "已入账" if row.status == "applied" else "已隔离" }}</span></td>
+          <td class="trunc" title="{{ row.detail }}">{{ (row.code + " · " if row.code else "") }}{{ row.detail }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="empty">本批次没有退货行。</p>
+  {% endif %}
 </section>
 
 <section class="section">

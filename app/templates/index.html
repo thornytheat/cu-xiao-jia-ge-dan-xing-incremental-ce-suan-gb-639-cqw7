@@ -33,7 +33,11 @@
       <dt class="verdict-key">增量合计</dt>
       <dd class="verdict-value">{{ totals.lift_gmv | money }}<small>{{ money_unit }}</small></dd>
     </div>
-    <p class="verdict-note">质量等级 {{ totals.grade or "—" }} · 严重 {{ totals.quarantine_error or 0 }} 条 · 警告 {{ totals.quarantine_warn or 0 }} 条</p>
+    <div class="verdict-cell">
+      <dt class="verdict-key">退货入账</dt>
+      <dd class="verdict-value">{{ totals.returns_applied or 0 }}<small>笔 / 退 {{ totals.returned_qty or 0 }} 件</small></dd>
+    </div>
+    <p class="verdict-note">质量等级 {{ totals.grade or "—" }} · 严重 {{ totals.quarantine_error or 0 }} 条 · 警告 {{ totals.quarantine_warn or 0 }} 条{% if totals.returns_quarantined %} · 退货隔离 {{ totals.returns_quarantined }} 笔{% endif %}</p>
   </dl>
 </section>
 

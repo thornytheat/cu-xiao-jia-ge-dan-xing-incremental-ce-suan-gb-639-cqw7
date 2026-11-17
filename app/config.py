@@ -18,7 +18,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CHINA_TZ = dt.timezone(dt.timedelta(hours=8), "Asia/Shanghai")
 UTC = dt.timezone.utc
 
-RULE_VERSION = "pricelift/1.4.0"
+RULE_VERSION = "pricelift/1.5.0"
 MONEY_QUANT = Decimal("0.01")
 QTY_QUANT = Decimal("1")
 PRICE_QUANT = Decimal("0.0001")
@@ -136,6 +136,12 @@ DATASETS = {
         "control": "control_group.csv",
         "label": "仅表头样例",
     },
+    "returns": {
+        "sales": "daily_sales_returns.csv",
+        "promo": "promo_calendar.csv",
+        "control": "control_group.csv",
+        "label": "分次退货样例（退货编号 + 原销售日 + 超额/无原售）",
+    },
     "empty": {
         "sales": "empty.csv",
         "promo": "promo_calendar.csv",
@@ -155,6 +161,9 @@ COLUMNS = (
     ("税率", "tax_rate", "税率%"),
     ("销量", "qty", "数量", "销售数量"),
     ("促销编号", "promo_id", "活动编号"),
+    # 退货专用列（可选）：负销量行必须带这两列才是可入账的分次退货
+    ("退货编号", "return_id", "退货单号", "退款编号"),
+    ("原销售日", "original_sale_date", "原售日期", "原销售日期"),
     # 促销日历专用列
     ("版本", "version"),
     ("开始日期", "start_date"),

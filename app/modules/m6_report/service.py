@@ -53,6 +53,13 @@ def reconcile(store, batch_id: str) -> list[dict]:
     lift = coerce.money(_dec(totals.get("lift_gmv", "0")))
     spread = coerce.money(_dec(totals.get("spread_total", "0")))
     rows.append(_money_line("分摊账", lift, spread, "增量合计 = 各渠道分摊合计"))
+
+    # 退货账：原售销量 = 剩余销量（入模）+ 已退销量；原售与退款分开留账
+    gross = int(totals.get("gross_qty", 0))
+    net_all = int(totals.get("net_qty_total", 0))
+    returned = int(totals.get("returned_qty", 0))
+    rows.append(_line("退货账", gross, net_all + returned,
+                      "原售销量 = 剩余销量 + 已退销量（退款另记退货日金额）"))
     return rows
 
 
@@ -85,6 +92,8 @@ def _money_line(account: str, left: Decimal, right: Decimal, note: str) -> dict:
 def export_rows(kind: str, store, batch_id: str) -> str:
     if kind == "sales":
         return csv_out.sales_csv(store.sales(batch_id))
+    if kind == "returns":
+        return csv_out.returns_csv(store.returns(batch_id))
     if kind == "elastic":
         return csv_out.elastic_csv(store.elasticity(batch_id))
     if kind == "reconcile":

@@ -59,7 +59,9 @@ def _daily(rows, dates, sku, channel) -> Decimal:
     for row in rows:
         if row.sku != sku or row.channel != channel or row.sale_date not in dates:
             continue
-        seen[row.sale_date] = seen.get(row.sale_date, Decimal("0")) + Decimal(row.qty)
+        # 基线日均按剩余销量（退货已扣回原销售日）
+        qty = getattr(row, "net_qty", row.qty)
+        seen[row.sale_date] = seen.get(row.sale_date, Decimal("0")) + Decimal(qty)
     if not seen:
         return Decimal("0")
     total = sum(seen.values(), Decimal("0"))
@@ -135,20 +137,30 @@ def compute(promo_windows, promo_dates, rows, control, base_prices) -> Baseline 
     )
 
 
-def actual_totals(rows, promo_dates, sku, channel) -> tuple[Decimal, Decimal]:
+def actual_totals(rows, promo_dates, sku, channel, refund_only=()
+                  ) -> tuple[Decimal, Decimal]:
+    """促销窗实际口径：剩余销量 + 净销售额（含退货日没有销售行的纯退款）。"""
     qty = Decimal("0")
     gmv = Decimal("0")
     for row in rows:
         if row.sku == sku and row.channel == channel and row.sale_date in promo_dates:
-            qty += Decimal(row.qty)
-            gmv += row.amount_excl
+            qty += Decimal(getattr(row, "net_qty", row.qty))
+            gmv += getattr(row, "net_amount", row.amount_excl)
+    for item in refund_only:
+        if (item["sku"] == sku and item["channel"] == channel
+                and item["sale_date"] in promo_dates):
+            gmv += item["amount"]
     return qty, coerce.money(gmv)
 
 
-def channel_totals(rows, dates, sku) -> dict[str, Decimal]:
+def channel_totals(rows, dates, sku, refund_only=()) -> dict[str, Decimal]:
     out: dict[str, Decimal] = {}
     for row in rows:
         if row.sku != sku or row.sale_date not in dates:
             continue
-        out[row.channel] = out.get(row.channel, Decimal("0")) + row.amount_excl
+        out[row.channel] = (out.get(row.channel, Decimal("0"))
+                            + getattr(row, "net_amount", row.amount_excl))
+    for item in refund_only:
+        if item["sku"] == sku and item["sale_date"] in dates:
+            out[item["channel"]] = out.get(item["channel"], Decimal("0")) + item["amount"]
     return {k: coerce.money(v) for k, v in out.items()}

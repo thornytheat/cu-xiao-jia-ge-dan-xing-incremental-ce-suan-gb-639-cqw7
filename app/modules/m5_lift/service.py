@@ -90,7 +90,7 @@ def compute_lift(assessed, elastic_rows) -> dict:
             })
             continue
         actual_qty, actual_gmv = baseline.actual_totals(
-            assessed["sales"], dates, sku, channel)
+            assessed["sales"], dates, sku, channel, assessed.get("refund_only", ()))
         dlnp = ci.log_ratio(fit.price_excl, fit.pre_price_excl)
         lift_qty = (actual_qty - fit.base_qty).quantize(Decimal("0.0001"))
         lift_gmv = (actual_gmv - fit.base_gmv).quantize(config.MONEY_QUANT)
@@ -119,7 +119,8 @@ def compute_lift(assessed, elastic_rows) -> dict:
             else "区间不含 0",
         })
         measured.append(promo_id)
-        channel_gmv = baseline.channel_totals(assessed["sales"], dates, sku)
+        channel_gmv = baseline.channel_totals(
+            assessed["sales"], dates, sku, assessed.get("refund_only", ()))
         shares = spread.allocate(lift_gmv, channel_gmv)
         for share in shares:
             spread_rows.append({
@@ -171,6 +172,10 @@ def run(settings: config.Settings, store: Store, dataset: str = "main",
             "batch_key": batch_key,
             "counters": store.totals(existing["batch_id"]),
         }
+    # 崩溃恢复：上次中断留下的非 done 批次没有完整账目，先清掉再重算，
+    # 保证「恢复后账目与样本一致」，不会读到半批数据。
+    for stale in store.unfinished_batches():
+        store.delete_batch(stale["batch_id"])
 
     timings: list[tuple[str, int, int, int, float]] = []
     mark = time.perf_counter()
@@ -234,9 +239,13 @@ def run(settings: config.Settings, store: Store, dataset: str = "main",
              "price_incl": str(row.price_incl), "price_unit": row.price_unit,
              "tax_rate": str(row.tax_rate), "price_excl": str(row.price_excl),
              "qty": row.qty, "promo_id": row.promo_id,
-             "amount_excl": str(row.amount_excl), "flags": row.flags}
+             "amount_excl": str(row.amount_excl), "flags": row.flags,
+             "returned_qty": row.returned_qty, "refund_excl": str(row.refund_excl),
+             "net_qty": row.net_qty, "net_amount": str(row.net_amount),
+             "return_ids": row.return_ids}
             for row in assessed["sales"]
         ],
+        "returns": [record.as_dict() for record in assessed["returns"]],
         "promos": [
             {"promo_id": version.promo_id, "sku": version.sku,
              "channel": version.channel, "version": version.version,
@@ -263,13 +272,28 @@ def run(settings: config.Settings, store: Store, dataset: str = "main",
         "totals": totals,
         "manifest": manifest_doc,
     }
+    # 先落 running 批次头，再在单事务里写全部账目，最后才置 done：
+    # 进程在写账中途被杀时留下的是 running 残留，下次运行由崩溃恢复清掉重算，
+    # 永远不会把「批次头已完成、账目写了一半」的半批数据暴露给页面。
+    store.upsert_batch({
+        "batch_id": batch_id, "batch_key": batch_key, "run_id": run_id,
+        "dataset": dataset, "status": "running", "created_at": started_at,
+        "finished_at": None,
+        "input_digest": manifest_doc["input_digest"],
+        "params": {"zero_mode": mode}, "note": loaded["state_label"],
+    })
+    try:
+        store.write_batch(batch_id, payload)
+    except Exception:
+        store.mark_batch_failed(batch_id)
+        raise
     store.upsert_batch({
         "batch_id": batch_id, "batch_key": batch_key, "run_id": run_id,
         "dataset": dataset, "status": "done", "created_at": started_at,
-        "finished_at": finished_at, "input_digest": manifest_doc["input_digest"],
+        "finished_at": finished_at,
+        "input_digest": manifest_doc["input_digest"],
         "params": {"zero_mode": mode}, "note": loaded["state_label"],
     })
-    store.write_batch(batch_id, payload)
     return {
         "batch": store.get_batch(batch_id),
         "replay": False,
@@ -292,6 +316,16 @@ def build_totals(loaded, assessed, lift, all_quarantine, counts) -> dict:
     actual_gmv = sum((Decimal(r["actual_gmv"]) for r in lift["rows"]), Decimal("0"))
     base_gmv = sum((Decimal(r["base_gmv"]) for r in lift["rows"]), Decimal("0"))
     lift_gmv = sum((Decimal(r["lift_gmv"]) for r in lift["rows"]), Decimal("0"))
+    return_ledger = assessed.get("returns", [])
+    returns_applied = [r for r in return_ledger if r.status == "applied"]
+    returns_quarantined = [r for r in return_ledger if r.status == "quarantined"]
+    refund_total = sum((r.refund_amount for r in returns_applied), Decimal("0"))
+    refund_only_total = sum((abs(item["amount"]) for item in
+                             assessed.get("refund_only", [])), Decimal("0"))
+    returned_qty = sum((r.qty for r in returns_applied), 0)
+    # 退货账：原售销量 = 剩余销量 + 已退销量（入模行口径）
+    gross_qty = sum((r.qty for r in assessed["sales"]), 0)
+    net_qty_all = sum((r.net_qty for r in assessed["sales"]), 0)
     return {
         "records_total": total_records,
         "rows_ok": rows_ok,
@@ -322,6 +356,14 @@ def build_totals(loaded, assessed, lift, all_quarantine, counts) -> dict:
         "quarantine_info": counts[reasons.INFO],
         "coverage": score["coverage"],
         "grade": score["grade"],
+        "return_records": len(return_ledger),
+        "returns_applied": len(returns_applied),
+        "returns_quarantined": len(returns_quarantined),
+        "returned_qty": returned_qty,
+        "refund_total": str(refund_total.quantize(config.MONEY_QUANT)),
+        "refund_only_total": str(refund_only_total.quantize(config.MONEY_QUANT)),
+        "gross_qty": gross_qty,
+        "net_qty_total": net_qty_all,
     }
 
 

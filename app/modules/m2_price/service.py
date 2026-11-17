@@ -10,7 +10,7 @@ from decimal import Decimal
 from statistics import median
 
 from ... import config
-from . import coerce, versions
+from . import coerce, returns as returns_mod, versions
 
 
 @dataclass
@@ -28,6 +28,20 @@ class SaleRow:
     price_unit: str
     amount_excl: Decimal
     flags: list[str] = field(default_factory=list)
+    # 退货分账：qty/amount_excl 永远是原售口径；returned_qty/refund_excl 记扣回，
+    # net_qty/net_amount 是入模口径（退款按退货日落在 net_amount 上）。
+    returned_qty: int = 0
+    refund_excl: Decimal = Decimal("0")
+    net_qty: int | None = None
+    net_amount: Decimal | None = None
+    return_ids: list[str] = field(default_factory=list)
+
+    def __post_init__(self):
+        # 没挂退货的行：净口径等于原售口径，构造测试行时无需逐字段填净列
+        if self.net_qty is None:
+            self.net_qty = self.qty
+        if self.net_amount is None:
+            self.net_amount = self.amount_excl
 
 
 def _q(row, code, stage="price", field_name="", raw="", detail="") -> dict:
@@ -42,10 +56,16 @@ def _drop(dropped: list[dict], row, code: str) -> None:
 
 
 def parse_sales(parsed, source_name: str = "daily_sales"
-                ) -> tuple[list[SaleRow], list[dict], list[dict]]:
+                ) -> tuple[list[SaleRow], list[dict], list[dict], list[dict]]:
+    """返回 (销售行, 隔离行, 剔除行, 退货候选行)。
+
+    负销量不再直接当坏数据：带退货语义的负行先收进退货候选，交给 returns 模块
+    对照原售日校验后入账；既没有退货编号也没有原销售日的负行才走 P_QTY_NEGATIVE。
+    """
     rows: list[SaleRow] = []
     quarantine: list[dict] = []
     dropped: list[dict] = []
+    return_candidates: list[dict] = []
     for record in parsed.records:
         data = record.data
         base = {"source": source_name, "line_no": record.line_no}
@@ -87,26 +107,42 @@ def parse_sales(parsed, source_name: str = "daily_sales"
             dropped.append({"sale_date": sale_date, "sku": sku, "channel": channel,
                             "code": "P_SENTINEL_QTY", "line_no": record.line_no})
             continue
-        if qty < 0:
-            quarantine.append(_q(base, "P_QTY_NEGATIVE", field_name="销量",
-                                 raw=str(qty), detail="销量为负"))
-            dropped.append({"sale_date": sale_date, "sku": sku, "channel": channel,
-                            "code": "P_QTY_NEGATIVE", "line_no": record.line_no})
-            continue
         rate, tax_note = coerce.to_tax_rate(data.get("税率"))
+        price_excl = coerce.excl_of(price_incl, rate)
+        if qty < 0:
+            candidate = {
+                "source": source_name, "line_no": record.line_no,
+                "sale_date": sale_date, "channel": channel, "sku": sku,
+                "sku_name": (data.get("商品名称") or "").strip(),
+                "price_incl": price_incl, "price_excl": price_excl,
+                "tax_rate": rate, "qty": -qty,
+                "return_id": (data.get("退货编号") or "").strip(),
+                "origin_raw": (data.get("原销售日") or "").strip(),
+                "origin_date": coerce.to_date(data.get("原销售日"))
+                if not coerce.is_sentinel(data.get("原销售日")) else None,
+                "price_unit": data.get("单价单位", "") or "元/件",
+            }
+            if not candidate["return_id"] and not candidate["origin_raw"]:
+                quarantine.append(_q(base, "P_QTY_NEGATIVE", field_name="销量",
+                                     raw=str(qty), detail="销量为负且无退货编号/原销售日"))
+                dropped.append({"sale_date": sale_date, "sku": sku, "channel": channel,
+                                "code": "P_QTY_NEGATIVE", "line_no": record.line_no})
+                continue
+            return_candidates.append(candidate)
+            continue
         flags = list(notes)
         if tax_note:
             flags.append(tax_note)
-        price_excl = coerce.excl_of(price_incl, rate)
+        amount_excl = coerce.money(price_excl * Decimal(qty))
         rows.append(SaleRow(
             line_no=record.line_no, sale_date=sale_date, channel=channel, sku=sku,
             sku_name=(data.get("商品名称") or "").strip(),
             price_incl=price_incl, price_excl=price_excl, tax_rate=rate, qty=qty,
             promo_id=(data.get("促销编号") or "").strip(),
             price_unit=data.get("单价单位", "") or "元/件",
-            amount_excl=coerce.money(price_excl * Decimal(qty)),
-            flags=flags))
-    return rows, quarantine, dropped
+            amount_excl=amount_excl, flags=flags,
+            net_qty=qty, net_amount=amount_excl))
+    return rows, quarantine, dropped, return_candidates
 
 
 def base_prices(rows: list[SaleRow]) -> dict[tuple[str, str], Decimal]:
@@ -162,14 +198,20 @@ def flag_outliers(rows: list[SaleRow], base: dict[tuple[str, str], Decimal]):
 
 def normalize(loaded: dict) -> dict:
     files = loaded["files"]
-    sales_rows, sales_q, sales_drop = parse_sales(files["sales"], "daily_sales")
-    control_rows, control_q, control_drop = parse_sales(files["control"], "control_group")
+    sales_rows, sales_q, sales_drop, return_candidates = parse_sales(
+        files["sales"], "daily_sales")
+    control_rows, control_q, control_drop, _ = parse_sales(
+        files["control"], "control_group")
     base = base_prices(sales_rows)
     sales_rows, low_q, low_drop = flag_outliers(sales_rows, base)
     control_rows, control_low_q, _ = flag_outliers(control_rows, base_prices(control_rows))
 
+    # 退货在异常价剔除之后再对原售日入账，避免把隔离行当成可退的原售
+    returns_result = returns_mod.apply_returns(sales_rows, return_candidates)
+
     promo = versions.build(files["promo"].records)
-    quarantine = sales_q + low_q + control_q + control_low_q + promo["quarantine"]
+    quarantine = (sales_q + low_q + control_q + control_low_q
+                  + returns_result["quarantine"] + promo["quarantine"])
     # 采信阶段的编码 / BOM / 分段提示逐文件落到隔离区，便于复核
     for role in ("sales", "promo", "control"):
         parsed = files[role]
@@ -195,6 +237,11 @@ def normalize(loaded: dict) -> dict:
     return {
         "sales": sales_rows,
         "control": control_rows,
+        "returns": returns_result["ledger"],
+        "refund_only": returns_result["refund_only"],
+        "return_candidates": len(return_candidates),
+        "returns_applied": returns_result["applied"],
+        "returns_quarantined": returns_result["quarantined"],
         "base_prices": base,
         "base_prices_excl": base_prices_excl(sales_rows),
         "control_base_prices": base_prices(control_rows),

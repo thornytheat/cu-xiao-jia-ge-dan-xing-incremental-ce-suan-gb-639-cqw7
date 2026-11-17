@@ -55,5 +55,12 @@ def build(*, run_id: str, batch_id: str, batch_key: str, settings, dataset: str,
         "stages": stages,
         "counters": counters,
         "totals": totals,
-        "replayable": "同 batch_key 重跑复用已有结果，不新增行",
+        "returns": {
+            "rule": "退款记退货发生日，购买量扣回原销售日；入模用剩余销量",
+            "applied": counters.get("returns_applied", 0),
+            "quarantined": counters.get("returns_quarantined", 0),
+            "returned_qty": counters.get("returned_qty", 0),
+            "refund_total": counters.get("refund_total", "0.00"),
+        },
+        "replayable": "同 batch_key 重跑复用已有结果，不新增行；退货按行号定序，重放不重复扣减",
     }

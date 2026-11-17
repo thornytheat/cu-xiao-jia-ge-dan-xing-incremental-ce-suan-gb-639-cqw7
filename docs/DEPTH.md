@@ -1,7 +1,8 @@
 # 深度登记 pricelift（促销价格弹性与增量测算）
 
-- 规模：中型（7 个功能模块 / 7 个页面 / 80 个文件 / 90 条测试 / 18 条陷阱）
-- 核心规则一：**对数线性弹性**——`ln q = a + b·ln p` 用最小二乘估计，先对 x 与 y 双中心化再求比值（漏掉中心化斜率会变正）；0 销量默认按 `ln(q+0.5)` 统一平移，可切到剔除；输出斜率、标准误、t 值与 R²，`|t| < 1.96` 记为不显著。
+- 规模：中型（7 个功能模块 / 7 个页面 / 80+ 个文件 / 106 条测试 / 19 条陷阱）
+- 核心规则零：**分次退货与净口径**——负销量带「退货编号 + 原销售日」才是退货行；退款记退货发生日的净销售额，购买量扣回原销售日的剩余销量（`net_qty`），退货当天不会被读成需求暴跌；超额、无原售、重复编号退货进隔离区，补齐原售后可在隔离区重放，行号定序保证重试不重复扣减。
+- 核心规则一：**对数线性弹性**——`ln q = a + b·ln p` 用最小二乘估计，先对 x 与 y 双中心化再求比值（漏掉中心化斜率会变正）；0 销量默认按 `ln(q+0.5)` 统一平移，可切到剔除；输出斜率、标准误、t 值与 R²，`|t| < 1.96` 记为不显著。弹性吃净销量。
 - 核心规则二：**增量测算与区间**——基线 = 促销前 14 天日均 × 促销有效天数 × 对照组同期倍数；增量 = 实际 − 基线（Decimal，2 位）；区间宽度用弹性斜率的 delta 法给出，斜率标准误为 0 时区间收成一点。
 - 核心规则三：**实验设计**——统计单位是「一天一条日销售额」；`k = z(1−α/2) + z(功效)`，`最小实验期 n = (A² + sqrt(A⁴ + 4·A²·m))/2`（`A = k·cv/目标效应`，`m = 14` 天基线窗）；方差用 HC1 稳健标准误与朴素标准误的比值放大；缺日必须按三种补法各算一遍，结论不一致就标出来。
 - 使用者与工作流：牧原乳品区域销售部 6 人，每周十余个促销，增量靠经验拍。现在导入日销与促销日历即可得到「弹性 + 增量 + 区间 + 五账」，再按下一期目标效应算实验期、对照与预期区间，每条结论都能追到行号与原因码。
@@ -12,7 +13,7 @@
 |---|---|---|---|---|
 | M1 采信 | 导入日销/促销/对照组三份文件，看到逐文件诊断与空态结论 | POST /api/import、页面 / | `app/modules/m1_ingest/service.py` `app/modules/m1_ingest/reader.py` `app/modules/m1_ingest/decode.py` `app/modules/m1_ingest/sniff.py` | `tests/test_ingest.py` |
 | M2 归价 | 查看列契约、换算规则、促销版本与生效窗口，试算单条价格 | GET /api/contract、POST /api/price/preview、页面 /contract | `app/modules/m2_price/contract.py` `app/modules/m2_price/coerce.py` `app/modules/m2_price/versions.py` | `tests/test_price.py` |
-| M3 质量隔离 | 看严重度分布与隔离行，导出隔离 CSV | GET /api/quarantine、GET /api/quarantine.csv、页面 /quarantine | `app/modules/m3_quality/rules.py` `app/modules/m3_quality/quarantine.py` `app/modules/m3_quality/metrics.py` | `tests/test_quality.py` |
+| M3 质量隔离 | 看严重度分布与隔离行、退货台账，隔离后可重放，导出隔离 CSV | GET /api/quarantine、GET /api/quarantine.csv、GET /api/returns、POST /api/quarantine/replay、页面 /quarantine | `app/modules/m3_quality/rules.py` `app/modules/m3_quality/quarantine.py` `app/modules/m3_quality/metrics.py` `app/modules/m2_price/returns.py` | `tests/test_quality.py` `tests/test_returns.py` |
 | M4 弹性 | 看每个商品与每个渠道的弹性、标准误、R²、显著性 | GET /api/elasticity、页面 /elasticity | `app/modules/m4_elastic/prepare.py` `app/modules/m4_elastic/ols.py` `app/modules/m4_elastic/fit.py` | `tests/test_elasticity.py` |
 | M5 增量与批次 | 触发增量测算、看区间与渠道分摊、查批次历史与幂等重跑 | POST /api/lift、GET /api/batches、页面 /lift | `app/modules/m5_lift/baseline.py` `app/modules/m5_lift/ci.py` `app/modules/m5_lift/spread.py` `app/modules/m5_lift/service.py` | `tests/test_lift.py` |
 | M6 报告导出 | 核对五账，导出增量/弹性/五账/运行清单 | GET /api/report、GET /api/export、页面 /report | `app/modules/m6_report/csv_out.py` `app/modules/m6_report/manifest_out.py` `app/modules/m6_report/service.py` | `tests/test_report.py` |
@@ -42,6 +43,11 @@
 | TRAP-25 | 两版活动价的区间重叠 | 取到哪版看运气，重叠日重复计天数 | 重叠天数显式标出（`Q_PROMO_OVERLAP`），按版本号大者生效 | `app/modules/m2_price/versions.py` | `tests/test_price.py::test_version_overlap_marked_and_highest_wins` |
 | TRAP-27 | 促销期内缺 1-2 天，缺日按 0 补 | 日均被压低、波动被放大，预期区间从「不含 0」翻成「含 0」 | 三种补法（丢弃 / 按 0 / 按均值）各算一遍，区间含 0 或所需天数极差超 10% 就记 `D_IMPUTE_SENSITIVE` 并逐行给出数值 | `app/modules/m7_design/impute.py` | `tests/test_design.py::test_impute_sensitivity_flips_on_light_missing` |
 | TRAP-28 | 候选对照在实验期内自己也在促销 | 同期倍数把它自己的促销算进基线，增量被抵掉 | 先按实验期（左闭右开）判重叠，有重叠直接标 `排除`（`D_CONTROL_OVERLAP`），只从「可用」里选对照 | `app/modules/m7_design/control.py` | `tests/test_design.py::test_control_excludes_candidate_with_promo_in_experiment_window` |
+| TRAP-29 | 退货行是负销量，被当成坏数据隔离 | 真实退货全部丢失，退款与购买量都对不上 | 负销量带退货编号+原销售日即入退货账，裸负数才记 `P_QTY_NEGATIVE` | `app/modules/m2_price/service.py` `app/modules/m2_price/returns.py` | `tests/test_returns.py::test_bare_negative_qty_without_return_fields_uses_old_code` |
+| TRAP-30 | 把退货当天的负销量当成需求暴跌 | 弹性回归被离群点带偏，斜率失真 | 退款只冲减退货日净销售额，购买量扣回原销售日 `net_qty`，退货日不产生需求点 | `app/modules/m2_price/returns.py` `app/modules/m4_elastic/prepare.py` | `tests/test_returns.py::test_split_returns_deduct_origin_but_book_refund_on_refund_day` |
+| TRAP-31 | 分次退货累计超过原售日购买量 | 净销量被扣成负数，后续金额全线为负 | 按行号定序累计，超额记 `Q_RETURN_EXCEED` 隔离且原账不动 | `app/modules/m2_price/returns.py` | `tests/test_returns.py::test_partial_then_exceed_keeps_first_application` |
+| TRAP-32 | 同一退货编号因重试被入账两次 | 退货重复扣减，账目与样本对不上 | 退货编号去重（`Q_RETURN_DUP_ID`）+ 行号定序的确定性处理 + 批次键幂等 | `app/modules/m2_price/returns.py` `app/modules/m5_lift/service.py` | `tests/test_returns.py::test_replay_same_input_is_idempotent_and_deducts_once` |
+| TRAP-33 | 写账进程中途被杀 | 页面读到「批次头完成、账目半批」的脏数据 | 先落 running 批次头、单事务写全部账目、最后置 done；重跑先清理非 done 残留再重算 | `app/store.py` `app/modules/m5_lift/service.py` | `tests/test_returns.py::test_write_interruption_recovers_with_consistent_ledger` |
 
 ## 对账规则
 
@@ -50,9 +56,10 @@
 - 金额账：实际销售额 = 基线销售额 + 增量销售额（Decimal，2 位）
 - 促销账：促销总数 4 = 已测算 2 + 被阻断 1 + 未生效 1
 - 分摊账：增量合计 = 各渠道分摊合计（最大余额法补齐尾差）
+- 退货账：原售销量 = 剩余销量（入模）+ 已退销量；原售 `qty/amount_excl` 与净口径 `net_qty/net_amount` 分行留账，退货逐笔在 `returns` 表
 
-五账在 `GET /api/report`、`/report` 页面与 `/api/export?kind=reconcile` 中显示；
-任一账差额非 0 时结论列写「不平」，页面上的五账结论也随之变红。
+五账在 `GET /api/report`、`/report` 页面与 `/api/export?kind=reconcile` 中显示，
+退货账紧随其后（共六账）；任一账差额非 0 时结论列写「不平」，页面上的账目结论也随之变红。
 
 ## 设计账
 
@@ -66,7 +73,7 @@
 - 反例（朴素实现会挂）：`tests/test_elasticity.py::test_naive_uncentered_slope_differs`（漏掉中心化，斜率从 -0.79 变成 +1.99）、`tests/test_price.py::test_naive_float_parse_would_raise`、`tests/test_ingest.py::test_naive_splitlines_breaks_record_count`、`tests/test_design.py::test_hc1_ratio_and_variance_factor_on_heteroskedastic_series`（按朴素标准误算 14 天，按稳健标准误要 20 天）、`tests/test_lift.py::test_baseline_blocks_when_control_mapping_missing`（没有映射就当倍数 1.0，品类走势被吞掉）。
 - 边界：`tests/test_lift.py::test_baseline_blocks_when_control_mapping_missing`、`tests/test_price.py::test_zero_length_promo_range_rejected`（区间长度 0 必须拒绝）、`tests/test_quality.py::test_coverage_gate_is_inclusive_at_threshold`（占比正好等于门槛仍进测算）、`tests/test_design.py::test_control_excludes_candidate_with_promo_in_experiment_window`（对照促销结束日正好等于实验开始日不算重叠）。
 - 不变量：`tests/test_lift.py::test_idempotent_rerun_adds_no_rows`（幂等重跑行数不变）、`tests/test_lift.py::test_interval_collapses_when_standard_error_is_zero`（区间收点）、`tests/test_quality.py::test_day_account_identity_holds`（天数账守恒）、`tests/test_lift.py::test_allocate_keeps_total_for_real_promotions`（分摊守恒）、`tests/test_report.py::test_reconcile_stays_balanced_under_drop_mode`（换 0 销量处理方式后五账仍平）、`tests/test_design.py::test_interval_contains_zero_when_power_is_low`（功效低于一半时区间必含 0）、`tests/test_design.py::test_design_window_is_half_open`（实验窗左闭右开）。
-- 端到端：`tests/test_e2e.py::test_full_pipeline_end_to_end`。
+- 端到端：`tests/test_e2e.py::test_full_pipeline_end_to_end`；退货全链路（隔离→补原售→重放、幂等、中断恢复、净口径入模）见 `tests/test_returns.py`。
 
 ## 已知不覆盖
 
